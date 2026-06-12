@@ -1,0 +1,112 @@
+// This file is a Codex-assisted rewrite based on the original work of
+// Josh Bassett (nullobject).
+
+// Signed audio mixer with fixed-point gain and 16-bit output clipping.
+module AudioMixer (
+  input         clock,
+  input         io_airgallet,
+  input         io_sailormoon,
+  input         io_mazinger,
+  input         io_metmqstr,
+  input  [13:0] io_in_4,
+  input  [13:0] io_in_3,
+  input  [15:0] io_in_2,
+  input  [15:0] io_in_1,
+  input  [15:0] io_in_0,
+  output [15:0] io_out
+);
+  localparam signed [28:0] MIN_SAMPLE = -29'sd32768;
+  localparam signed [28:0] MAX_SAMPLE =  29'sd32767;
+
+  wire signed [18:0] channel_1_sample = $signed({{3{io_in_1[15]}}, io_in_1});
+  wire signed [21:0] channel_3_sample = $signed({{6{io_in_3[13]}}, io_in_3, 2'b00});
+  wire signed [21:0] mazinger_fm_sample = $signed({{6{io_in_2[15]}}, io_in_2});
+  wire signed [28:0] air_fm_sample = $signed({{13{io_in_2[15]}}, io_in_2});
+  wire signed [28:0] air_bgm_sample = $signed({{13{io_in_3[13]}}, io_in_3, 2'b00});
+  wire signed [28:0] air_sfx_sample = $signed({{13{io_in_4[13]}}, io_in_4, 2'b00});
+  reg signed [28:0]  air_bgm_sample_reg;
+  wire signed [28:0] air_bgm_smoothed = (air_bgm_sample + air_bgm_sample_reg) >>> 1;
+
+  wire signed [18:0] channel_1_gain =
+    channel_1_sample + (channel_1_sample <<< 1);
+  wire signed [21:0] channel_3_gain =
+    (channel_3_sample <<< 4) + (channel_3_sample <<< 3) + (channel_3_sample <<< 1);
+  wire signed [21:0] mazinger_fm_gain =
+    (mazinger_fm_sample <<< 3) + (mazinger_fm_sample <<< 1);
+  wire signed [25:0] mazinger_oki_gain =
+    $signed({{5{io_in_4[13]}}, io_in_4, 7'b0000000})
+    + $signed({{7{io_in_4[13]}}, io_in_4, 5'b00000});
+
+  wire signed [25:0] base_mix_sum =
+    $signed({{6{io_in_0[15]}}, io_in_0, 4'b0000})
+    + $signed({{7{channel_1_gain[18]}}, channel_1_gain})
+    + $signed({{6{io_in_2[15]}}, io_in_2, 4'b0000})
+    + $signed({{4{channel_3_gain[21]}}, channel_3_gain})
+    + $signed({{6{io_in_4[13]}}, io_in_4, 6'b000000});
+  wire signed [25:0] mazinger_mix_sum =
+    $signed({{7{channel_1_gain[18]}}, channel_1_gain})
+    + $signed({{4{mazinger_fm_gain[21]}}, mazinger_fm_gain})
+    + mazinger_oki_gain;
+  wire signed [28:0] base_mix_ext = {{3{base_mix_sum[25]}}, base_mix_sum};
+  wire signed [28:0] mazinger_mix_ext = {{3{mazinger_mix_sum[25]}}, mazinger_mix_sum};
+  wire signed [28:0] air_fm_gain =
+    air_fm_sample <<< 2;                                  // x4
+  wire signed [28:0] air_bgm_gain =
+    (air_bgm_smoothed <<< 6)
+    + (air_bgm_smoothed <<< 5)
+    + (air_bgm_smoothed <<< 4)
+    + air_bgm_smoothed;                                   // x113
+  wire signed [28:0] air_sfx_gain =
+    (air_sfx_sample <<< 6)
+    + (air_sfx_sample <<< 4);                             // x80
+  wire signed [28:0] sailor_fm_gain =
+    air_fm_sample <<< 3;                                  // x8
+  wire signed [28:0] sailor_bgm_gain =
+    (air_bgm_smoothed <<< 6)
+    + (air_bgm_smoothed <<< 4)
+    + (air_bgm_smoothed <<< 3)
+    + (air_bgm_smoothed <<< 1);                           // x90
+  wire signed [28:0] sailor_sfx_gain = air_sfx_gain;       // x80
+  wire signed [28:0] metmqstr_fm_gain =
+    air_fm_sample <<< 5;                                   // x32
+  wire signed [28:0] metmqstr_bgm_gain =
+    (air_bgm_smoothed <<< 5)
+    + (air_bgm_smoothed <<< 4);                            // x48
+  wire signed [28:0] metmqstr_sfx_gain =
+    (air_sfx_sample <<< 5)
+    + (air_sfx_sample <<< 4);                              // x48
+  wire signed [28:0] air_mix_sum =
+    air_fm_gain + air_bgm_gain + air_sfx_gain;
+  wire signed [28:0] sailor_mix_sum =
+    sailor_fm_gain + sailor_bgm_gain + sailor_sfx_gain;
+  wire signed [28:0] metmqstr_mix_sum =
+    metmqstr_fm_gain + metmqstr_bgm_gain + metmqstr_sfx_gain;
+  wire signed [28:0] air_family_mix_sum =
+    io_sailormoon ? sailor_mix_sum : air_mix_sum;
+  wire signed [28:0] air_mix_ext_next = air_family_mix_sum >>> 1;
+  wire signed [28:0] metmqstr_mix_ext_next = metmqstr_mix_sum >>> 1;
+  wire signed [28:0] mazinger_boosted_mix_sum =
+    (mazinger_mix_ext <<< 1) + (mazinger_mix_ext >>> 2);
+  reg signed [28:0] air_mix_ext_reg;
+  reg signed [28:0] metmqstr_mix_ext_reg;
+  wire signed [28:0] mix_sum =
+    io_metmqstr  ? metmqstr_mix_ext_reg :
+    io_airgallet ? air_mix_ext_reg :
+    io_mazinger  ? mazinger_boosted_mix_sum :
+                   base_mix_ext;
+
+  wire signed [28:0] scaled_sum = mix_sum >>> 4;
+  wire signed [28:0] clipped_low = scaled_sum < MIN_SAMPLE ? MIN_SAMPLE : scaled_sum;
+  wire signed [28:0] clipped = clipped_low < MAX_SAMPLE ? clipped_low : MAX_SAMPLE;
+
+  reg signed [28:0] audio_reg;
+
+  always @(posedge clock) begin
+    air_bgm_sample_reg <= air_bgm_sample;
+    air_mix_ext_reg <= air_mix_ext_next;
+    metmqstr_mix_ext_reg <= metmqstr_mix_ext_next;
+    audio_reg <= clipped;
+  end
+
+  assign io_out = audio_reg[15:0];
+endmodule
